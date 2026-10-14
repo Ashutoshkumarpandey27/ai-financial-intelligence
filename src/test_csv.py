@@ -1,6 +1,14 @@
+
 import pandas as pd
 
-data = pd.read_csv("data/reliance_stock_data.csv", index_label="Date")
+# Read the saved CSV file
+data = pd.read_csv("data/reliance_stock_data.csv")
 
+# Display first five rows
 print(data.head())
+
+# Display dataset dimensions
 print("Dataset shape:", data.shape)
+
+# Display column names
+print("Columns:", data.columns.tolist())
