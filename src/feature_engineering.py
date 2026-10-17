@@ -199,3 +199,13 @@ assert y.notna().all(), "y contains missing values!"
 print("\nAll validation checks passed!")
 print("Feature engineering completed successfully.")
 
+
+
+model_data.to_csv(
+    "data/model_ready_dataset.csv",
+    index=False
+)
+
+print("Model-ready dataset saved successfully!")
+
+
