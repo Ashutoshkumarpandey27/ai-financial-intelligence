@@ -1,4 +1,6 @@
 
+import os
+import joblib
 import pandas as pd
 import numpy as np
 
@@ -104,7 +106,16 @@ model.fit(X_train, y_train)
 print("\nModel training completed successfully!")
 
 
-# 10. Display the trained coefficients and intercept
+# 10. Save the complete trained pipeline
+os.makedirs("models", exist_ok=True)
+
+model_path = "models/logistic_regression.pkl"
+joblib.dump(model, model_path)
+
+print(f"Model saved successfully at: {model_path}")
+
+
+# 11. Display the trained coefficients and intercept
 classifier = model.named_steps["classifier"]
 
 coefficients = classifier.coef_[0]
@@ -122,18 +133,18 @@ print("\nFeature Coefficients:")
 print(coefficient_table.to_string(index=False))
 
 
-# 11. Predict classes for unseen testing data
+# 12. Predict classes for unseen testing data
 predictions = model.predict(X_test)
 
 
-# 12. Get probabilities for both classes
+# 13. Get probabilities for both classes
 probabilities = model.predict_proba(X_test)
 
 print("\nFirst 5 probability predictions:")
 print(probabilities[:5])
 
 
-# 13. Display the first 5 predictions and their probabilities
+# 14. Display the first 5 predictions and their probabilities
 probability_table = pd.DataFrame({
     "Actual Target": y_test.iloc[:5].to_numpy(),
     "Predicted Class": predictions[:5],
@@ -145,14 +156,13 @@ print("\nFirst 5 predictions with probabilities:")
 print(probability_table.to_string(index=False))
 
 
-# 14. Calculate test accuracy
+# 15. Calculate test accuracy
 accuracy = accuracy_score(y_test, predictions)
 
 print(f"\nTest Accuracy: {accuracy:.2%}")
 
 
-# 15. Compare with the baseline:
-#     always predict the most frequent training class
+# 16. Compare with the baseline
 baseline_class = y_train.mode()[0]
 
 baseline_predictions = [baseline_class] * len(y_test)
@@ -167,7 +177,7 @@ print(f"Baseline Test Accuracy: {baseline_accuracy:.2%}")
 print(f"Logistic Regression Accuracy: {accuracy:.2%}")
 
 
-# 16. Display the confusion matrix
+# 17. Display the confusion matrix
 matrix = confusion_matrix(
     y_test,
     predictions,
@@ -178,7 +188,7 @@ print("\nConfusion Matrix (rows = actual, columns = predicted):")
 print(matrix)
 
 
-# 17. Display precision, recall, and F1-score
+# 18. Display precision, recall, and F1-score
 print("\nClassification Report:")
 print(classification_report(
     y_test,
