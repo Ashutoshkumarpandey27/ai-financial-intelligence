@@ -9,20 +9,15 @@ import matplotlib.pyplot as plt
 # 1. CONFIGURATION
 # =========================================================
 INITIAL_CAPITAL = 10000.0
-TRANSACTION_COST = 0.001  # Assumed combined cost: 0.1% per trade
+TRANSACTION_COST = 0.001  # Assumed combined round-trip cost: 0.1%
 TEST_RATIO = 0.80
 TRADING_DAYS_PER_YEAR = 252
 
-# =========================================================
-# 2. LOAD DATA AND TRAINED MODEL
-# =========================================================
-raw_data = pd.read_csv("data/reliance_stock_data.csv")
-model_data = pd.read_csv("data/model_ready_dataset.csv")
-model = joblib.load("models/logistic_regression.pkl")
+DATA_PATH = "data/model_ready_dataset.csv"
+MODEL_PATH = "models/logistic_regression.pkl"
+REPORT_DIR = "reports"
 
-required_raw = {"Date", "Open", "Close"}
-
-feature_columns = [
+FEATURE_COLUMNS = [
     "Close",
     "Daily_Return",
     "Previous_Day_Return",
@@ -31,137 +26,157 @@ feature_columns = [
     "Volume_Change",
 ]
 
-required_model = set(feature_columns + ["Date", "Target"])
+# =========================================================
+# 2. LOAD DATA AND MODEL
+# =========================================================
+model_data = pd.read_csv(DATA_PATH, parse_dates=["Date"])
+model = joblib.load(MODEL_PATH)
 
-if not required_raw.issubset(raw_data.columns):
+required_columns = set(
+    FEATURE_COLUMNS
+    + ["Date", "Target", "Next_Open", "Next_Close"]
+)
+
+missing_columns = required_columns - set(model_data.columns)
+
+if missing_columns:
     raise ValueError(
-        f"Raw dataset missing columns: "
-        f"{required_raw - set(raw_data.columns)}"
+        f"Model-ready dataset missing columns: {missing_columns}"
     )
 
-if not required_model.issubset(model_data.columns):
-    raise ValueError(
-        f"Model dataset missing columns: "
-        f"{required_model - set(model_data.columns)}"
-    )
+if model_data.empty:
+    raise ValueError("Model-ready dataset is empty.")
 
-if raw_data.empty or model_data.empty:
-    raise ValueError("One or both datasets are empty.")
-
-raw_data["Date"] = pd.to_datetime(raw_data["Date"], errors="raise")
-model_data["Date"] = pd.to_datetime(model_data["Date"], errors="raise")
-
-raw_data = raw_data.sort_values("Date").reset_index(drop=True)
-model_data = model_data.sort_values("Date").reset_index(drop=True)
-
-if raw_data["Date"].duplicated().any():
-    raise ValueError("Raw dataset contains duplicate dates.")
+model_data = (
+    model_data.sort_values("Date")
+    .reset_index(drop=True)
+)
 
 if model_data["Date"].duplicated().any():
-    raise ValueError("Model-ready dataset contains duplicate dates.")
-
-if not np.isfinite(
-    raw_data[["Open", "Close"]].to_numpy(dtype=float)
-).all():
-    raise ValueError("Raw prices contain non-finite values.")
-
-if (raw_data[["Open", "Close"]] <= 0).any().any():
-    raise ValueError("Raw prices must be positive.")
+    raise ValueError("Duplicate dates found in model-ready dataset.")
 
 if not 0 <= TRANSACTION_COST < 1:
-    raise ValueError("Transaction cost must be between 0 and 1.")
+    raise ValueError("TRANSACTION_COST must be between 0 and 1.")
+
+if INITIAL_CAPITAL <= 0:
+    raise ValueError("INITIAL_CAPITAL must be positive.")
 
 # =========================================================
-# 3. CHRONOLOGICAL TEST SPLIT
+# 3. VALIDATE TARGET AND EXECUTION PRICES
+# =========================================================
+numeric_columns = FEATURE_COLUMNS + [
+    "Target",
+    "Next_Open",
+    "Next_Close",
+]
+
+for column in numeric_columns:
+    model_data[column] = pd.to_numeric(
+        model_data[column],
+        errors="raise",
+    )
+
+if model_data[numeric_columns].isna().any().any():
+    raise ValueError("Missing values found in required columns.")
+
+if not np.isfinite(
+    model_data[numeric_columns].to_numpy(dtype=float)
+).all():
+    raise ValueError("Infinite or non-finite values found.")
+
+if not model_data["Target"].isin([0, 1]).all():
+    raise ValueError("Target must contain only 0 and 1.")
+
+if (
+    (model_data["Next_Open"] <= 0).any()
+    or (model_data["Next_Close"] <= 0).any()
+):
+    raise ValueError("Next-session execution prices must be positive.")
+
+# Target 1 means next session Close > next session Open.
+expected_target = (
+    model_data["Next_Close"] > model_data["Next_Open"]
+).astype(int)
+
+if not np.array_equal(
+    model_data["Target"].to_numpy(),
+    expected_target.to_numpy(),
+):
+    raise ValueError(
+        "Target does not match Next_Close > Next_Open. "
+        "Run and verify feature_engineering.py first."
+    )
+
+# =========================================================
+# 4. CHRONOLOGICAL SPLIT
+#    Match train_model.py exactly:
+#    train = [:split_index - 1]
+#    test  = [split_index:]
 # =========================================================
 split_index = int(len(model_data) * TEST_RATIO)
 
-if split_index <= 0 or split_index >= len(model_data):
+if split_index <= 1 or split_index >= len(model_data):
     raise ValueError("Not enough data for the selected split.")
 
+train_data = model_data.iloc[:split_index - 1].copy()
 test_data = model_data.iloc[split_index:].copy()
 
-if test_data[feature_columns].isna().any().any():
+if train_data.empty or test_data.empty:
+    raise ValueError("Training or test dataset is empty.")
+
+if test_data[FEATURE_COLUMNS].isna().any().any():
     raise ValueError("Missing values found in test features.")
 
 if not np.isfinite(
-    test_data[feature_columns].to_numpy(dtype=float)
+    test_data[FEATURE_COLUMNS].to_numpy(dtype=float)
 ).all():
     raise ValueError("Non-finite values found in test features.")
 
-# The model uses features from the signal date.
+# =========================================================
+# 5. VERIFY TRAINED MODEL'S TEST PERIOD
+# =========================================================
+# The saved model should have been trained using the same
+# chronological split and the same feature columns.
+
+if hasattr(model, "n_features_in_"):
+    if model.n_features_in_ != len(FEATURE_COLUMNS):
+        raise ValueError(
+            "Saved model expects a different number of features. "
+            "Retrain the model using train_model.py."
+        )
+
+metadata_path = "models/logistic_regression_metadata.pkl"
+
+if os.path.exists(metadata_path):
+    metadata = joblib.load(metadata_path)
+
+    saved_features = metadata.get("feature_columns")
+
+    if saved_features is not None:
+        if list(saved_features) != FEATURE_COLUMNS:
+            raise ValueError(
+                "Model metadata feature columns do not match "
+                "the backtest feature columns. Retrain the model."
+            )
+
+# Predict using signal-date features only.
+# Next_Open and Next_Close are NOT passed to the model.
 test_data["Prediction"] = model.predict(
-    test_data[feature_columns]
-)
+    test_data[FEATURE_COLUMNS]
+).astype(int)
 
 # =========================================================
-# 4. PREPARE NEXT SESSION'S EXECUTION PRICES
+# 6. CALCULATE NEXT-SESSION RETURNS
 # =========================================================
-# The signal is generated using information from date t.
-# Execution takes place during the next trading session.
-
-raw_data["Next_Open"] = raw_data["Open"].shift(-1)
-raw_data["Next_Close"] = raw_data["Close"].shift(-1)
-
-execution_prices = raw_data[
-    ["Date", "Next_Open", "Next_Close"]
-].copy()
-
-# IMPORTANT FIX:
-# The model-ready CSV may already contain Next_Open/Next_Close.
-# Remove them before merging to avoid duplicate column suffixes.
-test_data = test_data.drop(
-    columns=["Next_Open", "Next_Close"],
-    errors="ignore",
-)
-
-test_data = test_data.merge(
-    execution_prices,
-    on="Date",
-    how="left",
-    validate="one_to_one",
-)
-
-print("Test rows before price validation:", len(test_data))
-
-if not test_data.empty:
-    print(
-        "Signal period:",
-        test_data["Date"].min().date(),
-        "to",
-        test_data["Date"].max().date(),
-    )
-
-missing_prices = test_data[
-    ["Next_Open", "Next_Close"]
-].isna().any(axis=1).sum()
-
-print("Rows missing execution prices:", int(missing_prices))
-
-test_data = test_data.dropna(
-    subset=["Next_Open", "Next_Close"]
-).copy()
-
-if test_data.empty:
-    raise ValueError("No rows available for backtesting.")
-
-if (
-    (test_data["Next_Open"] <= 0).any()
-    or (test_data["Next_Close"] <= 0).any()
-):
-    raise ValueError("Execution prices must be positive.")
-
-# =========================================================
-# 5. CALCULATE RETURNS
-# =========================================================
-# Prediction == 1 means UP signal.
-# For an UP signal, buy at next session's Open and sell
-# at that same session's Close.
-# Prediction == 0 means stay out of the market.
+# Date = signal date t.
+# Next_Open and Next_Close = execution prices on session t+1.
+#
+# Prediction 1: buy at next session Open, sell at Close.
+# Prediction 0: stay out of the market.
 
 test_data["Market_Return"] = (
     test_data["Next_Close"] / test_data["Next_Open"]
-) - 1
+) - 1.0
 
 test_data["Is_Trade"] = (
     test_data["Prediction"] == 1
@@ -173,54 +188,61 @@ test_data["Strategy_Return_Before_Cost"] = np.where(
     0.0,
 )
 
-# Apply the assumed combined transaction cost to each trade.
+# Apply the assumed combined round-trip cost only to trades.
 test_data["Strategy_Return"] = np.where(
     test_data["Is_Trade"] == 1,
     (
-        (1 + test_data["Market_Return"])
-        * (1 - TRANSACTION_COST)
-    ) - 1,
+        (1.0 + test_data["Market_Return"])
+        * (1.0 - TRANSACTION_COST)
+    ) - 1.0,
     0.0,
 )
 
 # =========================================================
-# 6. MATCHED-PERIOD BENCHMARK
+# 7. MATCHED-PERIOD BENCHMARK
 # =========================================================
-# Benchmark: earn each test session's Open-to-Close return.
-# This is NOT continuous buy-and-hold.
+# Benchmark invests at every test session's Open and exits
+# at that session's Close. It is not continuous buy-and-hold.
 
 test_data["Benchmark_Return"] = test_data["Market_Return"]
 
 strategy_total_return = (
-    (1 + test_data["Strategy_Return"]).prod()
-) - 1
+    (1.0 + test_data["Strategy_Return"]).prod()
+) - 1.0
 
 benchmark_total_return = (
-    (1 + test_data["Benchmark_Return"]).prod()
-) - 1
+    (1.0 + test_data["Benchmark_Return"]).prod()
+) - 1.0
 
 trades = test_data.loc[
     test_data["Is_Trade"] == 1,
     "Strategy_Return",
 ]
 
+total_trades = len(trades)
 winning_trades = int((trades > 0).sum())
-total_trades = int(test_data["Is_Trade"].sum())
+losing_trades = int((trades < 0).sum())
+
+win_rate = (
+    winning_trades / total_trades
+    if total_trades > 0
+    else np.nan
+)
 
 # =========================================================
-# 7. EQUITY CURVES AND DRAWDOWN
+# 8. EQUITY CURVES AND DRAWDOWN
 # =========================================================
 test_data["Strategy_Equity"] = (
     INITIAL_CAPITAL
-    * (1 + test_data["Strategy_Return"]).cumprod()
+    * (1.0 + test_data["Strategy_Return"]).cumprod()
 )
 
 test_data["Benchmark_Equity"] = (
     INITIAL_CAPITAL
-    * (1 + test_data["Benchmark_Return"]).cumprod()
+    * (1.0 + test_data["Benchmark_Return"]).cumprod()
 )
 
-# Include initial capital when calculating running peaks.
+# Include initial capital when finding the running peak.
 equity_with_start = pd.concat(
     [
         pd.Series([INITIAL_CAPITAL]),
@@ -238,12 +260,12 @@ test_data["Running_Peak"] = (
 test_data["Drawdown"] = (
     test_data["Strategy_Equity"]
     / test_data["Running_Peak"]
-) - 1
+) - 1.0
 
 max_drawdown = float(test_data["Drawdown"].min())
 
 # =========================================================
-# 8. RISK-ADJUSTED PERFORMANCE
+# 9. RISK METRICS
 # =========================================================
 daily_returns = test_data["Strategy_Return"]
 daily_volatility = daily_returns.std(ddof=1)
@@ -259,29 +281,51 @@ if (
 else:
     sharpe_ratio = np.nan
 
+final_strategy_equity = float(
+    test_data["Strategy_Equity"].iloc[-1]
+)
+
+final_benchmark_equity = float(
+    test_data["Benchmark_Equity"].iloc[-1]
+)
+
 # =========================================================
-# 9. PRINT RESULTS
+# 10. PRINT RESULTS
 # =========================================================
+print("\n--- DATA AND SPLIT ---")
+print("Total model-ready rows:", len(model_data))
+print("Training rows:", len(train_data))
+print("Testing rows:", len(test_data))
+print(
+    "Training signal dates:",
+    train_data["Date"].min().date(),
+    "to",
+    train_data["Date"].max().date(),
+)
+print(
+    "Test signal dates:",
+    test_data["Date"].min().date(),
+    "to",
+    test_data["Date"].max().date(),
+)
+print("Features used:", len(FEATURE_COLUMNS))
+print("Target: Next session Close > Next session Open")
+
 print("\n--- BACKTEST RESULTS ---")
 print("Trading sessions:", len(test_data))
 print("UP signals / completed trades:", total_trades)
 print(f"Assumed combined cost per trade: {TRANSACTION_COST:.2%}")
-print(f"ML Strategy Return: {strategy_total_return:.2%}")
-print(f"Matched-period benchmark return: {benchmark_total_return:.2%}")
-print(
-    f"Final strategy equity: "
-    f"₹{test_data['Strategy_Equity'].iloc[-1]:,.2f}"
-)
-print(
-    f"Final benchmark equity: "
-    f"₹{test_data['Benchmark_Equity'].iloc[-1]:,.2f}"
-)
+print(f"ML strategy total return: {strategy_total_return:.2%}")
+print(f"Benchmark total return: {benchmark_total_return:.2%}")
+print(f"Final strategy equity: ₹{final_strategy_equity:,.2f}")
+print(f"Final benchmark equity: ₹{final_benchmark_equity:,.2f}")
 
 print("\n--- TRADE ANALYSIS ---")
 print("Winning trades:", winning_trades)
+print("Losing trades:", losing_trades)
 
-if not trades.empty:
-    print(f"Win rate: {winning_trades / len(trades):.2%}")
+if total_trades > 0:
+    print(f"Win rate: {win_rate:.2%}")
     print(f"Average return per trade: {trades.mean():.2%}")
     print(f"Best trade: {trades.max():.2%}")
     print(f"Worst trade: {trades.min():.2%}")
@@ -297,13 +341,14 @@ else:
     print("Annualized Sharpe ratio: Not available")
 
 # =========================================================
-# 10. EXPORT REPORTS
+# 11. EXPORT REPORTS
 # =========================================================
-os.makedirs("reports", exist_ok=True)
+os.makedirs(REPORT_DIR, exist_ok=True)
 
 report_columns = [
     "Date",
     "Prediction",
+    "Target",
     "Is_Trade",
     "Next_Open",
     "Next_Close",
@@ -317,8 +362,13 @@ report_columns = [
     "Drawdown",
 ]
 
+results_path = os.path.join(
+    REPORT_DIR,
+    "backtest_results.csv",
+)
+
 test_data[report_columns].to_csv(
-    "reports/backtest_results.csv",
+    results_path,
     index=False,
 )
 
@@ -327,16 +377,14 @@ summary = pd.DataFrame(
         "Metric": [
             "Trading Sessions",
             "UP Signals / Completed Trades",
+            "Winning Trades",
+            "Losing Trades",
+            "Win Rate",
             "Combined Transaction Cost per Trade",
             "ML Strategy Return",
             "Matched-Period Benchmark Return",
             "Maximum Drawdown",
             "Annualized Sharpe Ratio",
-            "Winning Trades",
-            "Win Rate",
-            "Average Return per Trade",
-            "Best Trade",
-            "Worst Trade",
             "Initial Capital",
             "Final Strategy Equity",
             "Final Benchmark Equity",
@@ -344,34 +392,34 @@ summary = pd.DataFrame(
         "Value": [
             len(test_data),
             total_trades,
+            winning_trades,
+            losing_trades,
+            win_rate,
             TRANSACTION_COST,
             strategy_total_return,
             benchmark_total_return,
             max_drawdown,
             sharpe_ratio,
-            winning_trades,
-            winning_trades / len(trades) if not trades.empty else np.nan,
-            trades.mean() if not trades.empty else np.nan,
-            trades.max() if not trades.empty else np.nan,
-            trades.min() if not trades.empty else np.nan,
             INITIAL_CAPITAL,
-            test_data["Strategy_Equity"].iloc[-1],
-            test_data["Benchmark_Equity"].iloc[-1],
+            final_strategy_equity,
+            final_benchmark_equity,
         ],
     }
 )
 
-summary.to_csv(
-    "reports/backtest_summary.csv",
-    index=False,
+summary_path = os.path.join(
+    REPORT_DIR,
+    "backtest_summary.csv",
 )
 
+summary.to_csv(summary_path, index=False)
+
 print("\n--- REPORTS SAVED ---")
-print("reports/backtest_results.csv")
-print("reports/backtest_summary.csv")
+print(results_path)
+print(summary_path)
 
 # =========================================================
-# 11. PLOT EQUITY CURVES
+# 12. PLOT EQUITY CURVES
 # =========================================================
 plt.figure(figsize=(12, 6))
 
@@ -384,10 +432,10 @@ plt.plot(
 plt.plot(
     test_data["Date"],
     test_data["Benchmark_Equity"],
-    label="Matched-period benchmark",
+    label="Matched-period intraday benchmark",
 )
 
-plt.title("Backtesting: ML Strategy vs Matched-Period Benchmark")
+plt.title("ML Strategy vs Matched-Period Intraday Benchmark")
 plt.xlabel("Signal Date")
 plt.ylabel("Portfolio Value (₹)")
 plt.legend()
