@@ -1,78 +1,134 @@
 
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 
 
 # ============================================================
-# 1. LOAD AND PREPARE THE DATASET
+# 1. LOAD AND VALIDATE RAW DATA
 # ============================================================
 
-data = pd.read_csv("data/reliance_stock_data.csv")
+input_path = "data/reliance_stock_data.csv"
+output_path = "data/model_ready_dataset.csv"
 
-# Convert Date column into datetime format
-data["Date"] = pd.to_datetime(data["Date"])
+if not os.path.exists(input_path):
+    raise FileNotFoundError(f"Dataset not found: {input_path}")
 
-# Arrange data from oldest to newest
+data = pd.read_csv(input_path)
+
+required_raw_columns = {"Date", "Open", "High", "Low", "Close", "Volume"}
+
+missing_columns = required_raw_columns - set(data.columns)
+
+if missing_columns:
+    raise ValueError(f"Missing raw columns: {sorted(missing_columns)}")
+
+if data.empty:
+    raise ValueError("Raw dataset is empty.")
+
+data["Date"] = pd.to_datetime(data["Date"], errors="raise")
+
+if data["Date"].isna().any():
+    raise ValueError("Date column contains missing values.")
+
+# Ensure price and volume columns contain numeric values.
+numeric_columns = ["Open", "High", "Low", "Close", "Volume"]
+
+for column in numeric_columns:
+    data[column] = pd.to_numeric(data[column], errors="raise")
+
+if data[numeric_columns].isna().any().any():
+    raise ValueError("Raw price or volume columns contain missing values.")
+
+if not np.isfinite(data[numeric_columns].to_numpy(dtype=float)).all():
+    raise ValueError("Raw data contains infinite or invalid numeric values.")
+
+if (data[["Open", "High", "Low", "Close"]] <= 0).any().any():
+    raise ValueError("Stock prices must be positive.")
+
+if (data["Volume"] < 0).any():
+    raise ValueError("Volume cannot be negative.")
+
 data = data.sort_values("Date").reset_index(drop=True)
+
+if data["Date"].duplicated().any():
+    raise ValueError("Duplicate dates found in raw dataset.")
 
 print("Dataset loaded successfully!")
 print("Original dataset shape:", data.shape)
-print("\nFirst 5 observations:")
-print(data.head())
+print("Date range:", data["Date"].min().date(), "to", data["Date"].max().date())
 
 
 # ============================================================
 # 2. CREATE RETURN FEATURES
 # ============================================================
 
-# Daily percentage return
+# Return from the previous trading observation to the current one.
 data["Daily_Return"] = data["Close"].pct_change()
 
-# Previous trading observation's return
+# These features use only current or past observations.
 data["Previous_Day_Return"] = data["Daily_Return"].shift(1)
-
-# Return from two trading observations ago
 data["Return_2_Days_Ago"] = data["Daily_Return"].shift(2)
 
-print("\nReturn features:")
-print(
-    data[
-        [
-            "Date",
-            "Close",
-            "Daily_Return",
-            "Previous_Day_Return",
-            "Return_2_Days_Ago",
-        ]
-    ].head(10)
-)
+print("\nReturn features created.")
 
 
 # ============================================================
-# 3. CREATE MOVING AVERAGE FEATURE
+# 3. CREATE MOVING AVERAGE
 # ============================================================
 
-# Average closing price over the latest 5 observations,
-# including the current observation
+# Includes today's closing price and the previous four observations.
 data["MA_5"] = data["Close"].rolling(window=5).mean()
 
-print("\n5-observation moving average:")
-print(data[["Date", "Close", "MA_5"]].head(10))
+print("MA_5 created.")
 
 
 # ============================================================
-# 4. CREATE VOLUME CHANGE FEATURE
+# 4. CREATE VOLUME CHANGE
 # ============================================================
 
-# Percentage change in trading volume
+# A previous volume of zero can produce infinity.
 data["Volume_Change"] = data["Volume"].pct_change()
 
-print("\nVolume change:")
-print(data[["Date", "Volume", "Volume_Change"]].head(10))
+data["Volume_Change"] = data["Volume_Change"].replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+print("Volume_Change created.")
 
 
 # ============================================================
-# 5. CHECK DATA QUALITY
+# 5. CREATE NEXT-OBSERVATION TARGET
+# ============================================================
+
+# Next trading observation's closing price.
+data["Next_Close"] = data["Close"].shift(-1)
+
+# Use nullable integer labels so the final unknown target stays missing.
+data["Target"] = pd.Series(
+    pd.NA,
+    index=data.index,
+    dtype="Int64"
+)
+
+known_target = data["Next_Close"].notna()
+
+data.loc[known_target, "Target"] = (
+    data.loc[known_target, "Next_Close"]
+    > data.loc[known_target, "Close"]
+).astype(int)
+
+# Target definition:
+# 1 = next close is higher than current close
+# 0 = next close is equal to or lower than current close
+
+print("\nTarget created.")
+print(data[["Date", "Close", "Next_Close", "Target"]].tail())
+
+
+# ============================================================
+# 6. CLEAN THE MODEL-READY DATASET
 # ============================================================
 
 feature_columns = [
@@ -84,128 +140,97 @@ feature_columns = [
     "Volume_Change",
 ]
 
-print("\nMissing values before cleaning:")
-print(data[feature_columns].isnull().sum())
+required_model_columns = feature_columns + ["Target"]
 
-print("\nInfinite values before cleaning:")
-print(np.isinf(data[feature_columns]).sum())
+# Drop rows where features or the target are unavailable.
+model_data = data.dropna(
+    subset=required_model_columns
+).copy()
 
-# Investigate observations with infinite volume changes
-infinite_rows = data[np.isinf(data["Volume_Change"])]
+# Convert target from nullable integer to standard integer.
+model_data["Target"] = model_data["Target"].astype(int)
 
-print("\nRows with infinite Volume_Change:")
-print(infinite_rows[["Date", "Volume", "Volume_Change"]])
+# Validate features and labels.
+feature_values = model_data[feature_columns].to_numpy(dtype=float)
 
-# Display the previous observation for investigation
-for i in infinite_rows.index:
-    if i > 0:
-        print("\nPrevious observation:")
-        print(data.loc[i - 1, ["Date", "Volume"]])
+if model_data.empty:
+    raise ValueError("No rows remain after cleaning.")
 
-# Replace positive and negative infinity with missing values
-data["Volume_Change"] = data["Volume_Change"].replace(
-    [np.inf, -np.inf],
-    np.nan,
+if not np.isfinite(feature_values).all():
+    raise ValueError("Model features contain invalid or infinite values.")
+
+if not model_data["Target"].isin([0, 1]).all():
+    raise ValueError("Target must contain only 0 and 1.")
+
+if model_data["Date"].duplicated().any():
+    raise ValueError("Duplicate dates found in model-ready dataset.")
+
+model_data = model_data.sort_values("Date").reset_index(drop=True)
+
+print("\n--- DATA CLEANING SUMMARY ---")
+print("Original rows:", len(data))
+print("Model-ready rows:", len(model_data))
+print("Rows removed:", len(data) - len(model_data))
+print(
+    "Model-ready date range:",
+    model_data["Date"].min().date(),
+    "to",
+    model_data["Date"].max().date()
 )
 
-print("\nInfinite values after cleaning:")
-print(np.isinf(data[["Volume_Change"]]).sum())
-
-print("\nMissing Volume_Change values after cleaning:")
-print(data["Volume_Change"].isnull().sum())
-
 
 # ============================================================
-# 6. CREATE THE TARGET VARIABLE
+# 7. DISPLAY TARGET DISTRIBUTION
 # ============================================================
-
-# Next trading observation's closing price
-data["Next_Close"] = data["Close"].shift(-1)
-
-# Target:
-# 1 = next closing price is higher
-# 0 = next closing price is equal to or lower
-data["Target"] = (
-    data["Next_Close"] > data["Close"]
-).astype("Int64")
-
-# The final observation has no known next closing price
-data.loc[data["Next_Close"].isna(), "Target"] = pd.NA
-
-print("\nTarget variable (last 10 observations):")
-print(data[["Date", "Close", "Next_Close", "Target"]].tail(10))
-
-
-# ============================================================
-# 7. CREATE THE MODEL-READY DATASET
-# ============================================================
-
-# Only require the selected features and target to be present
-required_columns = feature_columns + ["Target"]
-
-model_data = data.dropna(subset=required_columns).copy()
-
-print("\nModel-ready dataset:")
-print("Original rows:", len(data))
-print("Rows after cleaning:", len(model_data))
-print("Rows removed:", len(data) - len(model_data))
-
-print("\nFirst 5 model-ready observations:")
-print(model_data[["Date", "Close", "MA_5", "Target"]].head())
-
-
-# ============================================================
-# 8. SEPARATE FEATURES (X) AND TARGET (y)
-# ============================================================
-
-# X contains inputs used by the model
-X = model_data[feature_columns].copy()
-
-# y contains the answer the model learns to predict
-y = model_data["Target"].astype(int).copy()
-
-print("\nFeatures (X) shape:", X.shape)
-print("Target (y) shape:", y.shape)
-
-print("\nFirst 5 feature rows:")
-print(X.head())
-
-print("\nFirst 5 target values:")
-print(y.head())
-
-
-# ============================================================
-# 9. FINAL VALIDATION
-# ============================================================
-
-print("\nFinal validation:")
-
-print("X shape:", X.shape)
-print("y shape:", y.shape)
-
-print("Missing values in X:", X.isnull().sum().sum())
-print("Infinite values in X:", np.isinf(X).sum().sum())
-print("Missing values in y:", y.isnull().sum())
 
 print("\nTarget class distribution:")
-print(y.value_counts().sort_index())
+print(model_data["Target"].value_counts().sort_index())
 
-# Verify the dataset is ready for the next stage
-assert len(X) == len(y), "X and y have different row counts!"
-assert X.isnull().sum().sum() == 0, "X contains missing values!"
-assert np.isfinite(X.to_numpy()).all(), "X contains infinite or invalid values!"
-assert y.notna().all(), "y contains missing values!"
-
-print("\nAll validation checks passed!")
-print("Feature engineering completed successfully.")
-
-
-
-model_data.to_csv(
-    "data/model_ready_dataset.csv",
-    index=False
+print("\nTarget proportions:")
+print(
+    model_data["Target"]
+    .value_counts(normalize=True)
+    .sort_index()
+    .round(4)
 )
 
-print("Model-ready dataset saved successfully!")
+
+# ============================================================
+# 8. SAVE MODEL-READY DATASET
+# ============================================================
+
+os.makedirs("data", exist_ok=True)
+
+model_data.to_csv(output_path, index=False)
+
+print(f"\nModel-ready dataset saved to: {output_path}")
 
 
+# ============================================================
+# 9. RELOAD AND VERIFY SAVED FILE
+# ============================================================
+
+saved_data = pd.read_csv(output_path)
+
+if saved_data.empty:
+    raise ValueError("Saved model-ready dataset is empty.")
+
+if saved_data[required_model_columns].isna().any().any():
+    raise ValueError("Saved dataset contains missing features or targets.")
+
+saved_features = saved_data[feature_columns].to_numpy(dtype=float)
+
+if not np.isfinite(saved_features).all():
+    raise ValueError("Saved dataset contains infinite feature values.")
+
+if not saved_data["Target"].isin([0, 1]).all():
+    raise ValueError("Saved target contains invalid labels.")
+
+print("\n--- FINAL VALIDATION ---")
+print("Saved dataset shape:", saved_data.shape)
+print("Missing values in required columns:",
+      int(saved_data[required_model_columns].isna().sum().sum()))
+print("Infinite values in features:",
+      int(np.isinf(saved_features).sum()))
+
+print("\nFeature engineering completed successfully!")
