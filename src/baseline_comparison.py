@@ -16,7 +16,7 @@ DATA_PATH = "data/model_ready_dataset.csv"
 REPORT_DIR = "reports"
 
 INITIAL_CAPITAL = 10000.0
-TRANSACTION_COST = 0.001
+TRANSACTION_COST = 0.001  # Assumed round-trip cost: 0.1%
 INITIAL_TRAIN_RATIO = 0.60
 TEST_WINDOW_RATIO = 0.10
 
@@ -65,11 +65,23 @@ expected_target = (
     data["Next_Close"] > data["Next_Open"]
 ).astype(int)
 
-if not np.array_equal(data["Target"].to_numpy(), expected_target.to_numpy()):
+if not np.array_equal(
+    data["Target"].to_numpy(),
+    expected_target.to_numpy(),
+):
     raise ValueError("Target alignment check failed.")
 
 if (data[["Next_Open", "Next_Close"]] <= 0).any().any():
     raise ValueError("Execution prices must be positive.")
+
+if not 0 <= TRANSACTION_COST < 1:
+    raise ValueError("Transaction cost must be between 0 and 1.")
+
+if not 0 < INITIAL_TRAIN_RATIO < 1:
+    raise ValueError("INITIAL_TRAIN_RATIO must be between 0 and 1.")
+
+if not 0 < TEST_WINDOW_RATIO < 1:
+    raise ValueError("TEST_WINDOW_RATIO must be between 0 and 1.")
 
 # =========================================================
 # 3. MODEL AND WALK-FORWARD SETTINGS
@@ -85,16 +97,16 @@ base_model = Pipeline([
 initial_train_size = int(len(data) * INITIAL_TRAIN_RATIO)
 test_window = int(len(data) * TEST_WINDOW_RATIO)
 
-if test_window < 1:
-    raise ValueError("Test window is too small.")
+if initial_train_size < 1 or test_window < 1:
+    raise ValueError("Training or test window is too small.")
 
-# Collect out-of-sample predictions for every round.
 all_predictions = []
 train_end = initial_train_size
 round_number = 1
 
 while train_end + 1 + test_window <= len(data):
 
+    # Keep the original one-row gap between training and testing.
     test_start = train_end + 1
     test_end = test_start + test_window
 
@@ -102,8 +114,6 @@ while train_end + 1 + test_window <= len(data):
     y_train = y.iloc[:train_end]
 
     X_test = X.iloc[test_start:test_end]
-    y_test = y.iloc[test_start:test_end]
-
     test_data = data.iloc[test_start:test_end].copy()
 
     model = clone(base_model)
@@ -111,14 +121,12 @@ while train_end + 1 + test_window <= len(data):
 
     model_predictions = model.predict(X_test)
 
-    # Majority class is determined using training data only.
+    # Determine majority class from training labels only.
     majority_class = int(y_train.mean() >= 0.5)
 
-    # Baselines predict on the same unseen test rows.
     test_data["Model_Prediction"] = model_predictions
     test_data["Majority_Prediction"] = majority_class
     test_data["Always_UP_Prediction"] = 1
-
     test_data["Round"] = round_number
 
     all_predictions.append(test_data)
@@ -139,12 +147,14 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
 
     predictions = result[prediction_column].astype(int)
 
+    # Gross intraday market return for each test session.
     result["Market_Return"] = (
         result["Next_Close"] / result["Next_Open"]
     ) - 1.0
 
     result["Is_Trade"] = (predictions == 1).astype(int)
 
+    # Strategy trades only when its prediction is UP.
     result["Strategy_Return"] = np.where(
         result["Is_Trade"] == 1,
         (
@@ -154,8 +164,27 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
         0.0,
     )
 
-    # Evaluate each round separately because each round has
-    # a separately trained model and starts with fresh capital.
+    # Benchmark trades every test session.
+    # Gross benchmark: no transaction costs.
+    result["Benchmark_Return"] = result["Market_Return"]
+
+    # Net benchmark: transaction costs applied every session.
+    result["Benchmark_Return_After_Cost"] = (
+        (1.0 + result["Market_Return"])
+        * (1.0 - TRANSACTION_COST)
+    ) - 1.0
+
+    # Daily strategy excess returns versus both benchmarks.
+    result["Excess_Return"] = (
+        result["Strategy_Return"]
+        - result["Benchmark_Return"]
+    )
+
+    result["Excess_Return_After_Cost"] = (
+        result["Strategy_Return"]
+        - result["Benchmark_Return_After_Cost"]
+    )
+
     round_results = []
 
     for round_id, group in result.groupby("Round", sort=True):
@@ -163,8 +192,12 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
         predicted = group[prediction_column].astype(int)
 
         returns = group["Strategy_Return"]
-        trades = group.loc[group["Is_Trade"] == 1, "Strategy_Return"]
+        trades = group.loc[
+            group["Is_Trade"] == 1,
+            "Strategy_Return",
+        ]
 
+        # Strategy equity for this round.
         equity = INITIAL_CAPITAL * (1.0 + returns).cumprod()
 
         equity_with_start = pd.concat(
@@ -176,7 +209,6 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
         )
 
         peaks = equity_with_start.cummax().iloc[1:].to_numpy()
-
         drawdown = (equity.to_numpy() / peaks) - 1.0
 
         volatility = returns.std(ddof=1)
@@ -188,6 +220,20 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
         else:
             sharpe = np.nan
 
+        strategy_return = float(
+            (1.0 + returns).prod() - 1.0
+        )
+
+        gross_benchmark_return = float(
+            (1.0 + group["Benchmark_Return"]).prod() - 1.0
+        )
+
+        net_benchmark_return = float(
+            (
+                1.0 + group["Benchmark_Return_After_Cost"]
+            ).prod() - 1.0
+        )
+
         round_results.append({
             "Strategy": strategy_name,
             "Round": int(round_id),
@@ -198,18 +244,23 @@ def evaluate_strategy(frame, prediction_column, strategy_name):
             "Winning_Trades": int((trades > 0).sum()),
             "Win_Rate": (
                 float((trades > 0).mean())
-                if len(trades) > 0 else np.nan
+                if len(trades) > 0
+                else np.nan
             ),
-            "Strategy_Return": float(
-                (1.0 + returns).prod() - 1.0
+            "Strategy_Return": strategy_return,
+
+            # Original gross benchmark.
+            "Benchmark_Return": gross_benchmark_return,
+            "Excess_Return": (
+                strategy_return - gross_benchmark_return
             ),
-            "Benchmark_Return": float(
-                (1.0 + group["Market_Return"]).prod() - 1.0
+
+            # New cost-adjusted benchmark.
+            "Benchmark_Return_After_Cost": net_benchmark_return,
+            "Excess_Return_After_Cost": (
+                strategy_return - net_benchmark_return
             ),
-            "Excess_Return": float(
-                ((1.0 + returns).prod() - 1.0)
-                - ((1.0 + group["Market_Return"]).prod() - 1.0)
-            ),
+
             "Max_Drawdown": float(drawdown.min()),
             "Sharpe_Ratio": float(sharpe),
             "Final_Equity": float(equity.iloc[-1]),
@@ -243,26 +294,27 @@ results_df = pd.DataFrame(all_results)
 # =========================================================
 # 6. DISPLAY RESULTS
 # =========================================================
+display_columns = [
+    "Strategy",
+    "Round",
+    "Accuracy",
+    "Trades",
+    "Win_Rate",
+    "Strategy_Return",
+    "Benchmark_Return",
+    "Excess_Return",
+    "Benchmark_Return_After_Cost",
+    "Excess_Return_After_Cost",
+    "Max_Drawdown",
+    "Sharpe_Ratio",
+]
+
 print("\n--- WALK-FORWARD BASELINE COMPARISON ---\n")
-
 print(
-    results_df[
-        [
-            "Strategy",
-            "Round",
-            "Accuracy",
-            "Trades",
-            "Win_Rate",
-            "Strategy_Return",
-            "Benchmark_Return",
-            "Excess_Return",
-            "Max_Drawdown",
-            "Sharpe_Ratio",
-        ]
-    ].round(4).to_string(index=False)
+    results_df[display_columns]
+    .round(4)
+    .to_string(index=False)
 )
-
-print("\n--- AVERAGE PERFORMANCE BY STRATEGY ---\n")
 
 summary = (
     results_df.groupby("Strategy")
@@ -273,12 +325,19 @@ summary = (
         Average_Return_Per_Round=("Strategy_Return", "mean"),
         Average_Benchmark_Return=("Benchmark_Return", "mean"),
         Average_Excess_Return=("Excess_Return", "mean"),
+        Average_Benchmark_Return_After_Cost=(
+            "Benchmark_Return_After_Cost", "mean"
+        ),
+        Average_Excess_Return_After_Cost=(
+            "Excess_Return_After_Cost", "mean"
+        ),
         Average_Max_Drawdown=("Max_Drawdown", "mean"),
         Average_Sharpe=("Sharpe_Ratio", "mean"),
     )
     .reset_index()
 )
 
+print("\n--- AVERAGE PERFORMANCE BY STRATEGY ---\n")
 print(summary.round(4).to_string(index=False))
 
 # =========================================================
@@ -302,3 +361,6 @@ summary.to_csv(summary_report, index=False)
 print("\nReports saved:")
 print(round_report)
 print(summary_report)
+
+print(f"\nAssumed round-trip transaction cost: {TRANSACTION_COST:.2%}")
+print("Gross and cost-adjusted benchmark results are both saved.")

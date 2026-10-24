@@ -163,7 +163,7 @@ print(y_test.value_counts().sort_index())
 
 model = Pipeline([
     ("scaler", StandardScaler()),
-    ("classifier", LogisticRegression(max_iter=1000)),
+    ("classifier", LogisticRegression(max_iter=1000, random_state=42)),
 ])
 
 model.fit(X_train, y_train)

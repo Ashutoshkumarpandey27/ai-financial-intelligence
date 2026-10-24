@@ -872,7 +872,7 @@ st.divider()
 st.header("6. Historical Backtest Results")
 
 backtest_summary = load_csv_report("backtest_final_summary.csv")
-backtest_trades = load_csv_report("backtest_trades.csv")
+backtest_trades = load_csv_report("backtest_final_results.csv")
 
 if backtest_summary is None:
     st.info(

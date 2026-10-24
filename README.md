@@ -118,9 +118,23 @@ These tests help evaluate sensitivity to historical periods, trade frequency, an
 
 ## Key Findings
 
-The saved model metadata recorded a chronological holdout accuracy of approximately **58.94%**, compared with a recorded majority-class baseline accuracy of approximately **52.85%** for that evaluation.
+### Current Model — Chronological Holdout
 
-The four-round walk-forward evaluation produced the following average results for Logistic Regression:
+The latest current-model training run produced the following results:
+
+| Metric | Result |
+|---|---:|
+| Holdout accuracy | 59.35% |
+| Baseline accuracy | 53.25% |
+| UP precision | 61.54% |
+| UP recall | 34.78% |
+| UP F1-score | 44.44% |
+
+The holdout period contained 246 observations. These metrics describe classification performance on the configured chronological holdout and should not be interpreted as evidence of future profitability.
+
+### Walk-Forward Validation
+
+The four-round walk-forward evaluation produced the following average results:
 
 | Metric | Result |
 |---|---:|
@@ -132,9 +146,17 @@ The four-round walk-forward evaluation produced the following average results fo
 | Average excess return per round | +3.68 percentage points |
 | Average maximum drawdown per round | -7.86% |
 
-Results varied across rounds. Some periods outperformed the benchmark, while others produced negative strategy returns and underperformed.
+Results varied across rounds. The strategy outperformed the matched-period intraday benchmark on average in these experiments, but its average return per round was negative. This does not establish consistent profitability.
 
-These results describe historical experiments under stated assumptions. They do not demonstrate consistent profitability or guarantee future performance.
+### Latest Prediction
+
+The recorded prediction for the signal date 2026-10-14 was **UP**, with a predicted UP probability of 50.31%.
+
+This is a weak-confidence model output, not a guarantee of the next session's direction. The prediction uses historical data and is not a live-market forecast.
+
+### Interpretation
+
+Classification accuracy, trade profitability, and robustness are different measures. Historical results depend on the selected periods, transaction-cost assumptions, and execution conditions. Further out-of-sample testing is required before considering real-money use.
 
 ## Interactive Dashboard
 

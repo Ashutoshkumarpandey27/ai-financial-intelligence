@@ -14,6 +14,7 @@ from sklearn.metrics import (
     f1_score,
 )
 
+
 # =========================================================
 # 1. CONFIGURATION
 # =========================================================
@@ -21,7 +22,7 @@ DATA_PATH = "data/model_ready_dataset.csv"
 REPORT_DIR = "reports"
 
 INITIAL_CAPITAL = 10000.0
-TRANSACTION_COST = 0.001  # Assumed combined round-trip cost: 0.1%
+TRANSACTION_COST = 0.001  # Assumed round-trip cost: 0.1%
 TRADING_DAYS_PER_YEAR = 252
 
 INITIAL_TRAIN_RATIO = 0.60
@@ -35,6 +36,7 @@ FEATURE_COLUMNS = [
     "MA_5",
     "Volume_Change",
 ]
+
 
 # =========================================================
 # 2. LOAD AND VALIDATE DATA
@@ -52,11 +54,14 @@ missing_columns = set(required_columns) - set(data.columns)
 
 if missing_columns:
     raise ValueError(
-        f"Dataset is missing columns: {missing_columns}"
+        f"Dataset is missing columns: {sorted(missing_columns)}"
     )
 
 if data.empty:
     raise ValueError("Dataset is empty.")
+
+if data["Date"].isna().any():
+    raise ValueError("Missing or invalid dates found.")
 
 data = data.sort_values("Date").reset_index(drop=True)
 
@@ -70,29 +75,21 @@ numeric_columns = FEATURE_COLUMNS + [
 ]
 
 for column in numeric_columns:
-    data[column] = pd.to_numeric(
-        data[column],
-        errors="raise",
-    )
+    data[column] = pd.to_numeric(data[column], errors="raise")
 
 if data[numeric_columns].isna().any().any():
     raise ValueError("Missing values found in required columns.")
 
-if not np.isfinite(
-    data[numeric_columns].to_numpy(dtype=float)
-).all():
+if not np.isfinite(data[numeric_columns].to_numpy(dtype=float)).all():
     raise ValueError("Non-finite values found in required columns.")
 
 if not data["Target"].isin([0, 1]).all():
     raise ValueError("Target must contain only 0 and 1.")
 
-if (
-    (data["Next_Open"] <= 0).any()
-    or (data["Next_Close"] <= 0).any()
-):
+if (data[["Next_Open", "Next_Close"]] <= 0).any().any():
     raise ValueError("Execution prices must be positive.")
 
-# Verify that Target matches the next session's intraday direction.
+# Verify that the target matches the next session's intraday direction.
 expected_target = (
     data["Next_Close"] > data["Next_Open"]
 ).astype(int)
@@ -112,8 +109,15 @@ if not 0 <= TRANSACTION_COST < 1:
 if INITIAL_CAPITAL <= 0:
     raise ValueError("INITIAL_CAPITAL must be positive.")
 
+if not 0 < INITIAL_TRAIN_RATIO < 1:
+    raise ValueError("INITIAL_TRAIN_RATIO must be between 0 and 1.")
+
+if not 0 < TEST_WINDOW_RATIO < 1:
+    raise ValueError("TEST_WINDOW_RATIO must be between 0 and 1.")
+
 X = data[FEATURE_COLUMNS]
 y = data["Target"].astype(int)
+
 
 # =========================================================
 # 3. DEFINE MODEL
@@ -123,32 +127,25 @@ base_model = Pipeline([
     ("classifier", LogisticRegression(max_iter=1000)),
 ])
 
+
 # =========================================================
 # 4. WALK-FORWARD SETTINGS
 # =========================================================
-initial_train_size = int(
-    len(data) * INITIAL_TRAIN_RATIO
-)
+initial_train_size = int(len(data) * INITIAL_TRAIN_RATIO)
+test_window = int(len(data) * TEST_WINDOW_RATIO)
 
-test_window = int(
-    len(data) * TEST_WINDOW_RATIO
-)
+if initial_train_size < 2:
+    raise ValueError("Initial training set is too small.")
 
 if test_window < 1:
     raise ValueError("Test window is too small.")
-
-# Each round:
-# - Train on historical rows.
-# - Leave one signal row as a gap.
-# - Test on the next chronological window.
-#
-# The gap helps prevent adjacent target/execution periods
-# from overlapping across the train/test boundary.
 
 results = []
 round_number = 1
 train_end = initial_train_size
 
+# Each round trains on historical rows, leaves one row as a gap,
+# and evaluates on the next chronological test window.
 while train_end + 1 + test_window <= len(data):
 
     test_start = train_end + 1
@@ -173,44 +170,40 @@ while train_end + 1 + test_window <= len(data):
     accuracy = accuracy_score(y_test, predictions)
 
     precision_up = precision_score(
-        y_test,
-        predictions,
-        zero_division=0,
+        y_test, predictions, zero_division=0
     )
 
     recall_up = recall_score(
-        y_test,
-        predictions,
-        zero_division=0,
+        y_test, predictions, zero_division=0
     )
 
     f1_up = f1_score(
-        y_test,
-        predictions,
-        zero_division=0,
+        y_test, predictions, zero_division=0
     )
 
     # =====================================================
-    # 6. SIMULATE TRADES
+    # 6. SIMULATE STRATEGY AND BENCHMARK
     # =====================================================
     test_data["Prediction"] = predictions
 
-    # Only predictions are used to decide whether to trade.
-    # Execution prices are used only to calculate returns.
+    # Next-session Open-to-Close market return.
     test_data["Market_Return"] = (
         test_data["Next_Close"] / test_data["Next_Open"]
     ) - 1.0
 
+    # Trade only when the model predicts UP.
     test_data["Is_Trade"] = (
         test_data["Prediction"] == 1
     ).astype(int)
 
+    # Strategy return before transaction costs.
     test_data["Strategy_Return_Before_Cost"] = np.where(
         test_data["Is_Trade"] == 1,
         test_data["Market_Return"],
         0.0,
     )
 
+    # Strategy pays transaction costs only when it trades.
     test_data["Strategy_Return"] = np.where(
         test_data["Is_Trade"] == 1,
         (
@@ -220,9 +213,16 @@ while train_end + 1 + test_window <= len(data):
         0.0,
     )
 
-    # Benchmark invests in every session's Open-to-Close move.
+    # Gross benchmark: trades every test session, before costs.
     test_data["Benchmark_Return"] = test_data["Market_Return"]
 
+    # Cost-adjusted benchmark: assumes a trade every session.
+    test_data["Benchmark_Return_After_Cost"] = (
+        (1.0 + test_data["Market_Return"])
+        * (1.0 - TRANSACTION_COST)
+    ) - 1.0
+
+    # Compound returns within each test round.
     strategy_return = (
         (1.0 + test_data["Strategy_Return"]).prod()
     ) - 1.0
@@ -230,6 +230,17 @@ while train_end + 1 + test_window <= len(data):
     benchmark_return = (
         (1.0 + test_data["Benchmark_Return"]).prod()
     ) - 1.0
+
+    benchmark_return_after_cost = (
+        (1.0 + test_data["Benchmark_Return_After_Cost"]).prod()
+    ) - 1.0
+
+    # These comparisons have different trading exposure.
+    excess_return = strategy_return - benchmark_return
+
+    excess_return_after_cost = (
+        strategy_return - benchmark_return_after_cost
+    )
 
     # =====================================================
     # 7. TRADE AND RISK METRICS
@@ -257,6 +268,11 @@ while train_end + 1 + test_window <= len(data):
     test_data["Benchmark_Equity"] = (
         INITIAL_CAPITAL
         * (1.0 + test_data["Benchmark_Return"]).cumprod()
+    )
+
+    test_data["Benchmark_Equity_After_Cost"] = (
+        INITIAL_CAPITAL
+        * (1.0 + test_data["Benchmark_Return_After_Cost"]).cumprod()
     )
 
     # Include starting capital when calculating drawdown.
@@ -300,9 +316,7 @@ while train_end + 1 + test_window <= len(data):
     # =====================================================
     results.append({
         "Round": round_number,
-        "Train_End_Date": data["Date"].iloc[
-            train_end - 1
-        ].date(),
+        "Train_End_Date": data["Date"].iloc[train_end - 1].date(),
         "Test_Start_Date": test_data["Date"].iloc[0].date(),
         "Test_End_Date": test_data["Date"].iloc[-1].date(),
         "Train_Rows": len(X_train),
@@ -317,7 +331,9 @@ while train_end + 1 + test_window <= len(data):
         "Win_Rate": win_rate,
         "Strategy_Return": strategy_return,
         "Benchmark_Return": benchmark_return,
-        "Excess_Return": strategy_return - benchmark_return,
+        "Excess_Return": excess_return,
+        "Benchmark_Return_After_Cost": benchmark_return_after_cost,
+        "Excess_Return_After_Cost": excess_return_after_cost,
         "Max_Drawdown": max_drawdown,
         "Sharpe_Ratio": sharpe_ratio,
         "Final_Strategy_Equity": float(
@@ -326,11 +342,15 @@ while train_end + 1 + test_window <= len(data):
         "Final_Benchmark_Equity": float(
             test_data["Benchmark_Equity"].iloc[-1]
         ),
+        "Final_Benchmark_Equity_After_Cost": float(
+            test_data["Benchmark_Equity_After_Cost"].iloc[-1]
+        ),
     })
 
-    # Move forward in time. The next round trains on more data.
+    # Advance chronologically.
     train_end = test_end
     round_number += 1
+
 
 # =========================================================
 # 9. DISPLAY RESULTS
@@ -343,7 +363,7 @@ if results_df.empty:
         "Check dataset size and validation settings."
     )
 
-print("\nWALK-FORWARD VALIDATION RESULTS\n")
+print("\n--- WALK-FORWARD CLASSIFICATION RESULTS ---\n")
 
 print(
     results_df[
@@ -362,20 +382,15 @@ print(
     ].round(4).to_string(index=False)
 )
 
-print("\n--- CLASSIFICATION AVERAGES ---")
+print("\n--- CLASSIFICATION AVERAGES ---\n")
 
 print(
     results_df[
-        [
-            "Accuracy",
-            "Precision_UP",
-            "Recall_UP",
-            "F1_UP",
-        ]
+        ["Accuracy", "Precision_UP", "Recall_UP", "F1_UP"]
     ].mean().round(4)
 )
 
-print("\n--- TRADING RESULTS BY ROUND ---")
+print("\n--- TRADING RESULTS BY ROUND ---\n")
 
 print(
     results_df[
@@ -386,46 +401,49 @@ print(
             "Strategy_Return",
             "Benchmark_Return",
             "Excess_Return",
+            "Benchmark_Return_After_Cost",
+            "Excess_Return_After_Cost",
             "Max_Drawdown",
             "Sharpe_Ratio",
         ]
     ].round(4).to_string(index=False)
 )
 
-print("\n--- AGGREGATE TRADING SUMMARY ---")
+print("\n--- AVERAGE PERFORMANCE PER ROUND ---\n")
 
-# These are sums/averages of separate round-level results.
-# They are not one continuous compounded portfolio.
+summary_columns = [
+    "Accuracy",
+    "Trades",
+    "Win_Rate",
+    "Strategy_Return",
+    "Benchmark_Return",
+    "Excess_Return",
+    "Benchmark_Return_After_Cost",
+    "Excess_Return_After_Cost",
+    "Max_Drawdown",
+    "Sharpe_Ratio",
+]
+
+print(results_df[summary_columns].mean(numeric_only=True).round(4))
+
+print("\nTotal trades across rounds:", int(results_df["Trades"].sum()))
 
 print(
-    "Total trades across rounds:",
-    int(results_df["Trades"].sum()),
+    "Assumed round-trip transaction cost:",
+    f"{TRANSACTION_COST:.2%}",
 )
 
 print(
-    "Average strategy return per round:",
-    f"{results_df['Strategy_Return'].mean():.2%}",
+    "Note: Gross benchmark trades every test session. "
+    "The cost-adjusted benchmark also assumes a trade every session. "
+    "Model strategy trades only on UP predictions; exposures differ."
 )
 
 print(
-    "Average benchmark return per round:",
-    f"{results_df['Benchmark_Return'].mean():.2%}",
+    "Note: Average round returns summarize separate test windows; "
+    "they are not one continuous compounded portfolio."
 )
 
-print(
-    "Average excess return per round:",
-    f"{results_df['Excess_Return'].mean():.2%}",
-)
-
-print(
-    "Average round win rate:",
-    f"{results_df['Win_Rate'].mean():.2%}",
-)
-
-print(
-    "Average round maximum drawdown:",
-    f"{results_df['Max_Drawdown'].mean():.2%}",
-)
 
 # =========================================================
 # 10. SAVE REPORT
@@ -437,6 +455,19 @@ results_path = os.path.join(
     "walk_forward_results.csv",
 )
 
+summary_path = os.path.join(
+    REPORT_DIR,
+    "walk_forward_summary.csv",
+)
+
 results_df.to_csv(results_path, index=False)
 
-print("\nResults saved to", results_path)
+summary_df = results_df[summary_columns].mean(
+    numeric_only=True
+).to_frame(name="Average_Per_Round")
+
+summary_df.to_csv(summary_path)
+
+print("\nReports saved:")
+print(results_path)
+print(summary_path)
