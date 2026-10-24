@@ -120,7 +120,7 @@ These tests help evaluate sensitivity to historical periods, trade frequency, an
 
 ### Current Model — Chronological Holdout
 
-The latest current-model training run produced the following results:
+The latest reported current-model training run produced the following results:
 
 | Metric | Result |
 |---|---:|
@@ -130,7 +130,7 @@ The latest current-model training run produced the following results:
 | UP recall | 34.78% |
 | UP F1-score | 44.44% |
 
-The holdout period contained 246 observations. These metrics describe classification performance on the configured chronological holdout and should not be interpreted as evidence of future profitability.
+The holdout period contained 246 observations in the reported run. These metrics describe classification performance on that configured chronological holdout and should not be interpreted as evidence of future profitability.
 
 ### Walk-Forward Validation
 
@@ -150,7 +150,7 @@ Results varied across rounds. The strategy outperformed the matched-period intra
 
 ### Latest Prediction
 
-The recorded prediction for the signal date 2026-10-14 was **UP**, with a predicted UP probability of 50.31%.
+The recorded prediction for the signal date `2026-10-14` was **UP**, with a predicted UP probability of 50.31%.
 
 This is a weak-confidence model output, not a guarantee of the next session's direction. The prediction uses historical data and is not a live-market forecast.
 
@@ -188,10 +188,14 @@ ai-financial-intelligence/
 │   ├── logistic_regression.pkl
 │   └── logistic_regression_metadata.pkl
 ├── reports/
-│   ├── backtest_summary.csv
+│   ├── backtest_final_results.csv
+│   ├── backtest_final_summary.csv
+│   ├── baseline_comparison_results.csv
 │   ├── baseline_comparison_summary.csv
 │   ├── robustness_summary.csv
-│   └── walk_forward_results.csv
+│   ├── robustness_test_results.csv
+│   ├── walk_forward_results.csv
+│   └── walk_forward_summary.csv
 ├── src/
 │   ├── data_loader.py
 │   ├── eda.py
@@ -205,6 +209,8 @@ ai-financial-intelligence/
 │   ├── robustness_testing.py
 │   ├── threshold_tuning.py
 │   └── visualize_robustness.py
+├── tests/
+│   └── test_project_integrity.py
 ├── requirements.txt
 ├── README.md
 └── .gitignore
@@ -246,13 +252,13 @@ python -m streamlit run app.py
 
 Run commands from the project root with the virtual environment activated.
 
-**Exploratory data analysis**
+### Exploratory Data Analysis
 
 ```bash
 python src/eda.py
 ```
 
-**Train and evaluate Logistic Regression**
+### Train and Evaluate Logistic Regression
 
 ```bash
 python src/train_model.py
@@ -260,46 +266,46 @@ python src/train_model.py
 
 This script trains a model using its configured chronological split, evaluates it on the held-out test period, and saves the model and metadata. It overwrites the configured model files.
 
-**Run the backtest**
+### Run the Backtest
 
 ```bash
 python src/backtest.py
 ```
 
-**Validate backtest reports**
+### Validate Backtest Reports
 
 ```bash
 python src/validate_backtest.py
 ```
 
-**Compare baseline strategies**
+### Compare Baseline Strategies
 
 ```bash
 python src/baseline_comparison.py
 ```
 
-**Run walk-forward validation**
+### Run Walk-Forward Validation
 
 ```bash
 python src/walk_forward_validation.py
 ```
 
-**Run robustness testing**
+### Run Robustness Testing
 
 ```bash
 python src/robustness_testing.py
 ```
 
-**Generate robustness visualizations**
+### Generate Robustness Visualizations
 
 ```bash
 python src/visualize_robustness.py
 ```
 
-**Launch the dashboard**
+### Run Integrity Tests
 
 ```bash
-python -m streamlit run app.py
+python -m pytest tests/test_project_integrity.py -v
 ```
 
 Training and evaluation scripts can overwrite saved model files or reports. Run them intentionally and inspect their output.
