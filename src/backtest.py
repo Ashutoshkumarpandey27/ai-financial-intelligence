@@ -4,6 +4,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.base import clone
 
 # =========================================================
 # 1. CONFIGURATION
@@ -159,8 +160,15 @@ if os.path.exists(metadata_path):
                 "the backtest feature columns. Retrain the model."
             )
 
-# Predict using signal-date features only.
-# Next_Open and Next_Close are NOT passed to the model.
+# Train a fresh model using only chronological training data.
+model = clone(model)
+
+model.fit(
+    train_data[FEATURE_COLUMNS],
+    train_data["Target"].astype(int)
+)
+
+# Predict using test features only.
 test_data["Prediction"] = model.predict(
     test_data[FEATURE_COLUMNS]
 ).astype(int)
@@ -364,7 +372,7 @@ report_columns = [
 
 results_path = os.path.join(
     REPORT_DIR,
-    "backtest_results.csv",
+    "backtest_final_results.csv",
 )
 
 test_data[report_columns].to_csv(
@@ -409,7 +417,7 @@ summary = pd.DataFrame(
 
 summary_path = os.path.join(
     REPORT_DIR,
-    "backtest_summary.csv",
+    "backtest_final_summary.csv",
 )
 
 summary.to_csv(summary_path, index=False)

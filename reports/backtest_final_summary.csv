@@ -1,0 +1,14 @@
+Metric,Value
+Trading Sessions,246.0
+UP Signals / Completed Trades,65.0
+Winning Trades,39.0
+Losing Trades,26.0
+Win Rate,0.6
+Combined Transaction Cost per Trade,0.001
+ML Strategy Return,0.1045345309291319
+Matched-Period Benchmark Return,-0.1566335763126463
+Maximum Drawdown,-0.042016126315762015
+Annualized Sharpe Ratio,1.0055768827604608
+Initial Capital,10000.0
+Final Strategy Equity,11045.345309291319
+Final Benchmark Equity,8433.664236873537

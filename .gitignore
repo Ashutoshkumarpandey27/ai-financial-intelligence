@@ -1,5 +1,32 @@
-
+# Virtual environment
 .venv/
+venv/
+env/
+
+# Python cache files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
 .ipynb_checkpoints/
+
+# Pytest cache and temporary files
+.pytest_cache/
+pytest-cache-files-*/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Model backup files
+models/backup_before_retraining/
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
